@@ -95,7 +95,7 @@ func (avd EthAccountVerificationDecorator) AnteHandle(
 		}
 
 		if err := keeper.CheckSenderBalance(sdkmath.NewIntFromBigInt(acct.Balance), txData); err != nil {
-			return ctx, errorsmod.Wrapf(err, "failed to check sender balance: address %s", fromAddr)
+			return ctx, errorsmod.Wrapf(err, "failed to check sender balance: tx %s", msgEthTx)
 		}
 	}
 	return next(ctx, tx, simulate)
