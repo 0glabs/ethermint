@@ -69,7 +69,6 @@ func (avd EthAccountVerificationDecorator) AnteHandle(
 		if !ok {
 			return ctx, errorsmod.Wrapf(errortypes.ErrUnknownRequest, "invalid message type %T, expected %T", msg, (*evmtypes.MsgEthereumTx)(nil))
 		}
-
 		txData, err := evmtypes.UnpackTxData(msgEthTx.Data)
 		if err != nil {
 			return ctx, errorsmod.Wrapf(err, "failed to unpack tx data any for tx %d", i)
@@ -95,7 +94,13 @@ func (avd EthAccountVerificationDecorator) AnteHandle(
 		}
 
 		if err := keeper.CheckSenderBalance(sdkmath.NewIntFromBigInt(acct.Balance), txData); err != nil {
-			return ctx, errorsmod.Wrap(err, "failed to check sender balance")
+			ctx.Logger().Info("Failed to check sender balance",
+				"chainID", txData.GetChainID(),
+				"to", txData.GetTo(),
+				"nonce", txData.GetNonce(),
+				"from", fromAddr)
+
+			return ctx, errorsmod.Wrapf(err, "failed to check sender balance")
 		}
 	}
 	return next(ctx, tx, simulate)
