@@ -16,7 +16,6 @@
 package types
 
 import (
-	"errors"
 	"fmt"
 	"math/big"
 
@@ -27,7 +26,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/math"
-	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
@@ -91,42 +89,6 @@ func UnwrapEthereumMsg(tx *sdk.Tx, ethHash common.Hash) (*MsgEthereumTx, error) 
 	}
 
 	return nil, fmt.Errorf("eth tx not found: %s", ethHash)
-}
-
-// BinSearch execute the binary search and hone in on an executable gas limit
-func BinSearch(lo, hi uint64, executable func(uint64) (bool, *MsgEthereumTxResponse, error)) (uint64, error) {
-	// try with max gas limit first, if it's 'execution reverted', return the error directly
-	_, rsp, _ := executable(hi - 1)
-	if rsp != nil {
-		if rsp.VmError == vm.ErrExecutionReverted.Error() {
-			return 0, errors.New(rsp.VmError)
-		}
-		hi = rsp.GasUsed
-	}
-	// speed up by starting from 4x of the lower bound
-	mid := lo * 4
-	// when it's close enough, return the current hi
-	for lo+5000 < hi {
-		failed, rsp, err := executable(mid)
-		// If the error is not nil(consensus error), it means the provided message
-		// call or transaction will never be accepted no matter how much gas it is
-		// assigned. Return the error directly, don't struggle any more.
-		if err != nil {
-			return 0, err
-		}
-		if failed {
-			lo = mid
-		} else {
-			// it's actual gas used if rsp.GasUsed is more than half of the limit
-			if rsp != nil && rsp.GasUsed > mid/2+1 {
-				// increase the gas limit by 10% to avoid the gas limit too tight
-				return uint64(float64(rsp.GasUsed) * 1.1), nil
-			}
-			hi = mid
-		}
-		mid = (hi + lo) / 2
-	}
-	return hi, nil
 }
 
 // EffectiveGasPrice compute the effective gas price based on eip-1159 rules
