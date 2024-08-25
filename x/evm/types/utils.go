@@ -95,7 +95,7 @@ func UnwrapEthereumMsg(tx *sdk.Tx, ethHash common.Hash) (*MsgEthereumTx, error) 
 
 // BinSearch execute the binary search and hone in on an executable gas limit
 func BinSearch(lo, hi uint64, executable func(uint64) (bool, *MsgEthereumTxResponse, error)) (uint64, error) {
-	// speed up the search by starting from the 4x of the lower bound
+	// speed up by starting from 4x of the lower bound
 	mid := lo * 4
 	// when it's close enough, return the current hi
 	for lo+5000 < hi {
@@ -114,7 +114,7 @@ func BinSearch(lo, hi uint64, executable func(uint64) (bool, *MsgEthereumTxRespo
 		if failed {
 			lo = mid
 		} else {
-			// if the gas used is more than half of the limit, it means it's the actual value
+			// it's actual gas used if rsp.GasUsed is more than half of the limit
 			if rsp != nil && rsp.GasUsed > mid/2+1 {
 				// increase the gas limit by 10% to avoid the gas limit too tight
 				return uint64(float64(rsp.GasUsed) * 1.1), nil
