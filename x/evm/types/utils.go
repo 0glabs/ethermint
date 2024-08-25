@@ -95,21 +95,24 @@ func UnwrapEthereumMsg(tx *sdk.Tx, ethHash common.Hash) (*MsgEthereumTx, error) 
 
 // BinSearch execute the binary search and hone in on an executable gas limit
 func BinSearch(lo, hi uint64, executable func(uint64) (bool, *MsgEthereumTxResponse, error)) (uint64, error) {
+	// try with max gas limit first, if it's 'execution reverted', return the error directly
+	_, rsp, _ := executable(hi - 1)
+	if rsp != nil {
+		if rsp.VmError == vm.ErrExecutionReverted.Error() {
+			return 0, errors.New(rsp.VmError)
+		}
+		hi = rsp.GasUsed
+	}
 	// speed up by starting from 4x of the lower bound
 	mid := lo * 4
 	// when it's close enough, return the current hi
 	for lo+5000 < hi {
 		failed, rsp, err := executable(mid)
-		// If the error is not nil(consensus error) or 'execution reverted', it means the provided message
+		// If the error is not nil(consensus error), it means the provided message
 		// call or transaction will never be accepted no matter how much gas it is
 		// assigned. Return the error directly, don't struggle any more.
 		if err != nil {
 			return 0, err
-		}
-		if rsp != nil {
-			if rsp.VmError == vm.ErrExecutionReverted.Error() {
-				return 0, errors.New(rsp.VmError)
-			}
 		}
 		if failed {
 			lo = mid
