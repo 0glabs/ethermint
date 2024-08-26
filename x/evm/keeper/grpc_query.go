@@ -384,7 +384,7 @@ func (k Keeper) EstimateGas(c context.Context, req *types.EthCallRequest) (*type
 
 	// Refer to https://eips.ethereum.org/EIPS/eip-3529
 	// max gas refund is 20% of the gas used so we can estimate the gas used by dividing the gas used by 0.75
-	return &types.EstimateGasResponse{Gas: uint64(float64(result.GasUsed) / 0.75)}, nil
+	return &types.EstimateGasResponse{Gas: min(hi, uint64(float64(result.GasUsed)/0.75))}, nil
 }
 
 // TraceTx configures a new tracer according to the provided configuration, and
