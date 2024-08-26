@@ -382,23 +382,9 @@ func (k Keeper) EstimateGas(c context.Context, req *types.EthCallRequest) (*type
 		return nil, fmt.Errorf("gas required exceeds allowance (%d)", hi)
 	}
 
-	low := uint64(float64(result.GasUsed) * 1.1)
-	// Verify the low gas estimate is executable
-	failed, _, err = executable(low)
-	if !failed && err == nil {
-		return &types.EstimateGasResponse{Gas: low}, nil
-	}
-	// Binary search the gas requirement
-	for low+5000 < hi {
-		mid := (low + hi) / 2
-		failed, _, err = executable(mid)
-		if failed || err != nil {
-			low = mid
-		} else {
-			hi = mid
-		}
-	}
-	return &types.EstimateGasResponse{Gas: uint64(float64(hi) * 1.1)}, nil
+	// Refer to https://eips.ethereum.org/EIPS/eip-3529
+	// max gas refund is 20% of the gas used so we can estimate the gas used by dividing the gas used by 0.75
+	return &types.EstimateGasResponse{Gas: uint64(float64(result.GasUsed) / 0.75)}, nil
 }
 
 // TraceTx configures a new tracer according to the provided configuration, and
