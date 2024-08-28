@@ -18,6 +18,7 @@ package backend
 import (
 	"context"
 	"math/big"
+	"sync"
 	"time"
 
 	"github.com/cometbft/cometbft/libs/log"
@@ -36,6 +37,7 @@ import (
 	"github.com/evmos/ethermint/server/config"
 	ethermint "github.com/evmos/ethermint/types"
 	evmtypes "github.com/evmos/ethermint/x/evm/types"
+	"github.com/patrickmn/go-cache"
 )
 
 // BackendI implements the Cosmos and EVM backend.
@@ -144,6 +146,20 @@ var _ BackendI = (*Backend)(nil)
 
 var bAttributeKeyEthereumBloom = []byte(evmtypes.AttributeKeyEthereumBloom)
 
+// BlockCache is a cache for storing block data
+type BlockCache struct {
+	// cache is the underlying cache
+	cache *cache.Cache
+	// muMap is a map of block number to a mutex to prevent concurrent access to the same block
+	muMap sync.Map
+}
+
+func NewBlockCache() BlockCache {
+	return BlockCache{
+		cache: cache.New(5*time.Minute, 10*time.Minute),
+	}
+}
+
 // Backend implements the BackendI interface
 type Backend struct {
 	ctx                 context.Context
@@ -154,6 +170,7 @@ type Backend struct {
 	cfg                 config.Config
 	allowUnprotectedTxs bool
 	indexer             ethermint.EVMTxIndexer
+	blockCache          BlockCache
 }
 
 // NewBackend creates a new Backend instance for cosmos and ethereum namespaces
@@ -183,5 +200,6 @@ func NewBackend(
 		cfg:                 appConf,
 		allowUnprotectedTxs: allowUnprotectedTxs,
 		indexer:             indexer,
+		blockCache:          NewBlockCache(),
 	}
 }

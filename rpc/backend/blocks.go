@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"math/big"
 	"strconv"
+	"sync"
 
 	tmrpcclient "github.com/cometbft/cometbft/rpc/client"
 	tmrpctypes "github.com/cometbft/cometbft/rpc/core/types"
@@ -30,6 +31,7 @@ import (
 	"github.com/ethereum/go-ethereum/trie"
 	rpctypes "github.com/evmos/ethermint/rpc/types"
 	evmtypes "github.com/evmos/ethermint/x/evm/types"
+	"github.com/patrickmn/go-cache"
 	"github.com/pkg/errors"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -60,6 +62,21 @@ func (b *Backend) BlockNumber() (hexutil.Uint64, error) {
 	return hexutil.Uint64(height), nil
 }
 
+// lock a cache key to prevent concurrent access to the same key
+func (c *BlockCache) LockCacheKey(key string) {
+	value, _ := c.muMap.LoadOrStore(key, &sync.Mutex{})
+	mutex := value.(*sync.Mutex)
+	mutex.Lock()
+}
+
+// unlock a cache key
+func (c *BlockCache) UnlockCacheKey(key string) {
+	if value, exists := c.muMap.Load(key); exists {
+		mutex := value.(*sync.Mutex)
+		mutex.Unlock()
+	}
+}
+
 // GetBlockByNumber returns the JSON-RPC compatible Ethereum block identified by
 // block number. Depending on fullTx it either returns the full transaction
 // objects or if false only the hashes of the transactions.
@@ -74,17 +91,29 @@ func (b *Backend) GetBlockByNumber(blockNum rpctypes.BlockNumber, fullTx bool) (
 		return nil, nil
 	}
 
+	height := resBlock.Block.Height
+
+	cacheKey := fmt.Sprintf("%d-%t", height, fullTx)
+	b.blockCache.LockCacheKey(cacheKey)
+	defer b.blockCache.UnlockCacheKey(cacheKey)
+
+	if cachedBlock, found := b.blockCache.cache.Get(cacheKey); found {
+		return cachedBlock.(map[string]interface{}), nil
+	}
+
 	blockRes, err := b.TendermintBlockResultByNumber(&resBlock.Block.Height)
 	if err != nil {
-		b.logger.Debug("failed to fetch block result from Tendermint", "height", blockNum, "error", err.Error())
+		b.logger.Debug("failed to fetch block result from Tendermint", "height", height, "error", err.Error())
 		return nil, nil
 	}
 
 	res, err := b.RPCBlockFromTendermintBlock(resBlock, blockRes, fullTx)
 	if err != nil {
-		b.logger.Debug("GetEthBlockFromTendermint failed", "height", blockNum, "error", err.Error())
+		b.logger.Debug("GetEthBlockFromTendermint failed", "height", height, "error", err.Error())
 		return nil, err
 	}
+
+	b.blockCache.cache.Set(cacheKey, res, cache.DefaultExpiration)
 
 	return res, nil
 }
