@@ -132,6 +132,138 @@ func (b *Backend) getTransactionByHashPending(txHash common.Hash) (*rpctypes.RPC
 	return nil, nil
 }
 
+func (b *Backend) GetBlockReceipts(blockNum rpctypes.BlockNumber) ([]map[string]interface{}, error) {
+	resBlock, err := b.TendermintBlockByNumber(blockNum)
+	if err != nil {
+		b.logger.Debug("block not found", "height", blockNum, "error", err.Error())
+		return nil, nil
+	}
+	blockRes, err := b.TendermintBlockResultByNumber(&resBlock.Block.Height)
+	if err != nil {
+		b.logger.Debug("block result not found", "height", resBlock.Block.Height, "error", err.Error())
+		return nil, nil
+	}
+	rpcBlock, err := b.RPCBlockFromTendermintBlock(resBlock, blockRes, false)
+	if err != nil {
+		b.logger.Debug("GetEthBlockFromTendermint failed", "height", resBlock.Block.Height, "error", err.Error())
+		return nil, err
+	}
+	chainID, err := b.ChainID()
+	if err != nil {
+		return nil, err
+	}
+
+	txns := rpcBlock["transactions"].([]interface{})
+	ret := make([]map[string]interface{}, len(txns))
+	for idx, receipt := range txns {
+		hash, ok := receipt.(common.Hash)
+		if !ok {
+			return nil, fmt.Errorf("invalid type for receipt: expected common.Hash, got %T", receipt)
+		}
+		res, err := b.GetTxByEthHash(hash)
+		if err != nil {
+			b.logger.Debug("tx not found", "error", err.Error())
+		}
+		tx, err := b.clientCtx.TxConfig.TxDecoder()(resBlock.Block.Txs[res.TxIndex])
+		if err != nil {
+			b.logger.Debug("decoding failed", "error", err.Error())
+			return nil, fmt.Errorf("failed to decode tx: %w", err)
+		}
+		ethMsg := tx.GetMsgs()[res.MsgIndex].(*evmtypes.MsgEthereumTx)
+		txData, err := evmtypes.UnpackTxData(ethMsg.Data)
+		if err != nil {
+			b.logger.Error("failed to unpack tx data", "error", err.Error())
+			return nil, err
+		}
+		cumulativeGasUsed := uint64(0)
+		for _, txResult := range blockRes.TxsResults[0:res.TxIndex] {
+			cumulativeGasUsed += uint64(txResult.GasUsed)
+		}
+		cumulativeGasUsed += res.CumulativeGasUsed
+		hexTx := hash.Hex()
+		b.logger.Info("eth_getTransactionReceipt", "hash", hexTx)
+
+		var status hexutil.Uint
+		if res.Failed {
+			status = hexutil.Uint(ethtypes.ReceiptStatusFailed)
+		} else {
+			status = hexutil.Uint(ethtypes.ReceiptStatusSuccessful)
+		}
+
+		from, err := ethMsg.GetSender(chainID.ToInt())
+		if err != nil {
+			return nil, err
+		}
+
+		// parse tx logs from events
+		logs, err := TxLogsFromEvents(blockRes.TxsResults[res.TxIndex].Events, int(res.MsgIndex))
+		if err != nil {
+			b.logger.Debug("failed to parse logs", "hash", hexTx, "error", err.Error())
+		}
+
+		if res.EthTxIndex == -1 {
+			// Fallback to find tx index by iterating all valid eth transactions
+			msgs := b.EthMsgsFromTendermintBlock(resBlock, blockRes)
+			for i := range msgs {
+				if msgs[i].Hash == hexTx {
+					res.EthTxIndex = int32(i)
+					break
+				}
+			}
+		}
+		// return error if still unable to find the eth tx index
+		if res.EthTxIndex == -1 {
+			return nil, errors.New("can't find index of ethereum tx")
+		}
+
+		receipt := map[string]interface{}{
+			// Consensus fields: These fields are defined by the Yellow Paper
+			"status":            status,
+			"cumulativeGasUsed": hexutil.Uint64(cumulativeGasUsed),
+			"logsBloom":         ethtypes.BytesToBloom(ethtypes.LogsBloom(logs)),
+			"logs":              logs,
+
+			// Implementation fields: These fields are added by geth when processing a transaction.
+			// They are stored in the chain database.
+			"transactionHash": hash,
+			"contractAddress": nil,
+			"gasUsed":         hexutil.Uint64(res.GasUsed),
+
+			// Inclusion information: These fields provide information about the inclusion of the
+			// transaction corresponding to this receipt.
+			"blockHash":        common.BytesToHash(resBlock.Block.Header.Hash()).Hex(),
+			"blockNumber":      hexutil.Uint64(res.Height),
+			"transactionIndex": hexutil.Uint64(res.EthTxIndex),
+
+			// sender and receiver (contract or EOA) addreses
+			"from": from,
+			"to":   txData.GetTo(),
+			"type": hexutil.Uint(ethMsg.AsTransaction().Type()),
+		}
+
+		if logs == nil {
+			receipt["logs"] = [][]*ethtypes.Log{}
+		}
+
+		// If the ContractAddress is 20 0x0 bytes, assume it is not a contract creation
+		if txData.GetTo() == nil {
+			receipt["contractAddress"] = crypto.CreateAddress(from, txData.GetNonce())
+		}
+
+		if dynamicTx, ok := txData.(*evmtypes.DynamicFeeTx); ok {
+			baseFee, err := b.BaseFee(blockRes)
+			if err != nil {
+				// tolerate the error for pruned node.
+				b.logger.Error("fetch basefee failed, node is pruned?", "height", res.Height, "error", err)
+			} else {
+				receipt["effectiveGasPrice"] = hexutil.Big(*dynamicTx.EffectiveGasPrice(baseFee))
+			}
+		}
+		ret[idx] = receipt
+	}
+	return ret, nil
+}
+
 // GetTransactionReceipt returns the transaction receipt identified by hash.
 func (b *Backend) GetTransactionReceipt(hash common.Hash) (map[string]interface{}, error) {
 	hexTx := hash.Hex()
