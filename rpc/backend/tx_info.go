@@ -163,6 +163,7 @@ func (b *Backend) GetBlockReceipts(blockNum rpctypes.BlockNumber) ([]map[string]
 		res, err := b.GetTxByEthHash(hash)
 		if err != nil {
 			b.logger.Debug("tx not found", "error", err.Error())
+			return nil, nil
 		}
 		tx, err := b.clientCtx.TxConfig.TxDecoder()(resBlock.Block.Txs[res.TxIndex])
 		if err != nil {
