@@ -182,7 +182,6 @@ func (b *Backend) GetBlockReceipts(blockNum rpctypes.BlockNumber) ([]map[string]
 		}
 		cumulativeGasUsed += res.CumulativeGasUsed
 		hexTx := hash.Hex()
-		b.logger.Info("eth_getTransactionReceipt", "hash", hexTx)
 
 		var status hexutil.Uint
 		if res.Failed {
