@@ -172,6 +172,7 @@ type Backend struct {
 	allowUnprotectedTxs bool
 	indexer             ethermint.EVMTxIndexer
 	blockCache          BlockCache
+	nonceCache          *cache.Cache
 }
 
 // NewBackend creates a new Backend instance for cosmos and ethereum namespaces
@@ -202,5 +203,6 @@ func NewBackend(
 		allowUnprotectedTxs: allowUnprotectedTxs,
 		indexer:             indexer,
 		blockCache:          NewBlockCache(),
+		nonceCache:          cache.New(time.Minute, 5*time.Minute),
 	}
 }

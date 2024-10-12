@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"time"
 
 	sdkmath "cosmossdk.io/math"
 	sdk "github.com/cosmos/cosmos-sdk/types"
@@ -204,6 +205,22 @@ func (b *Backend) GetTransactionCount(address common.Address, blockNum rpctypes.
 		return nil, err
 	}
 
-	n := hexutil.Uint64(nonce)
+	cacheKey := fmt.Sprintf("%s-%d", address.Hex(), blockNum.Int64())
+
+	var n hexutil.Uint64
+
+	if cachedNonceVal, found := b.nonceCache.Get(cacheKey); found {
+		cachedNonce := cachedNonceVal.(uint64)
+		if cachedNonce >= nonce {
+			n = hexutil.Uint64(cachedNonce)
+		} else {
+			b.nonceCache.Set(cacheKey, nonce, 60*time.Second)
+			n = hexutil.Uint64(nonce)
+		}
+	} else {
+		b.nonceCache.Set(cacheKey, nonce, 60*time.Second)
+		n = hexutil.Uint64(nonce)
+	}
+
 	return &n, nil
 }
