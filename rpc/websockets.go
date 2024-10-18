@@ -408,7 +408,29 @@ func (api *pubSubAPI) subscribeNewHeads(wsConn *wsConn, subID rpc.ID) (pubsub.Un
 					continue
 				}
 
-				header := types.EthHeaderFromTendermint(data.Header, ethtypes.Bloom{}, baseFee)
+				cosmosHeader := data.Header
+				ethHeader := types.EthHeaderFromTendermint(cosmosHeader, ethtypes.Bloom{}, baseFee)
+
+				// replace with cometbft header block hash in order to the user who subscribed
+				// the "newHeads" message by web socket can get block by "eth_getBlockByHash" successfully.
+				compatibleEthHeader := &types.EthHeader{
+					ParentHash:       ethHeader.ParentHash,
+					UncleHash:        ethHeader.UncleHash,
+					Coinbase:         ethHeader.Coinbase,
+					Root:             ethHeader.Root,
+					TxHash:           ethHeader.TxHash,
+					ReceiptHash:      ethHeader.ReceiptHash,
+					Bloom:            ethHeader.Bloom,
+					Difficulty:       ethHeader.Difficulty,
+					Number:           ethHeader.Number,
+					GasLimit:         ethHeader.GasLimit,
+					GasUsed:          ethHeader.GasUsed,
+					Time:             ethHeader.Time,
+					Extra:            ethHeader.Extra,
+					MixDigest:        ethHeader.MixDigest,
+					Nonce:            ethHeader.Nonce,
+					CosmosHeaderHash: common.BytesToHash(cosmosHeader.Hash()),
+				}
 
 				// write to ws conn
 				res := &SubscriptionNotification{
@@ -416,7 +438,7 @@ func (api *pubSubAPI) subscribeNewHeads(wsConn *wsConn, subID rpc.ID) (pubsub.Un
 					Method:  "eth_subscription",
 					Params: &SubscriptionResult{
 						Subscription: subID,
-						Result:       header,
+						Result:       compatibleEthHeader,
 					},
 				}
 
