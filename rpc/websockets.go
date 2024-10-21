@@ -24,9 +24,11 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
 
 	"github.com/cosmos/cosmos-sdk/client"
+	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 	"github.com/pkg/errors"
@@ -38,14 +40,18 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/cometbft/cometbft/libs/log"
+	tmrpcclient "github.com/cometbft/cometbft/rpc/client"
+	tmrpctypes "github.com/cometbft/cometbft/rpc/core/types"
 	rpcclient "github.com/cometbft/cometbft/rpc/jsonrpc/client"
 	tmtypes "github.com/cometbft/cometbft/types"
 
+	"github.com/evmos/ethermint/rpc/backend"
 	"github.com/evmos/ethermint/rpc/ethereum/pubsub"
 	rpcfilters "github.com/evmos/ethermint/rpc/namespaces/ethereum/eth/filters"
 	"github.com/evmos/ethermint/rpc/types"
 	"github.com/evmos/ethermint/server/config"
 	evmtypes "github.com/evmos/ethermint/x/evm/types"
+	feemarkettypes "github.com/evmos/ethermint/x/feemarket/types"
 )
 
 type WebsocketsServer interface {
@@ -392,6 +398,9 @@ func (api *pubSubAPI) subscribeNewHeads(wsConn *wsConn, subID rpc.ID) (pubsub.Un
 	// TODO: use events
 	baseFee := big.NewInt(params.InitialBaseFee)
 
+	// query client for convert consensus address to validator address
+	queryClient := types.NewQueryClient(api.clientCtx)
+
 	go func() {
 		headersCh := sub.Event()
 		errCh := sub.Err()
@@ -407,7 +416,6 @@ func (api *pubSubAPI) subscribeNewHeads(wsConn *wsConn, subID rpc.ID) (pubsub.Un
 					api.logger.Debug("event data type mismatch", "type", fmt.Sprintf("%T", event.Data))
 					continue
 				}
-
 				cosmosHeader := data.Header
 				ethHeader := types.EthHeaderFromTendermint(cosmosHeader, ethtypes.Bloom{}, baseFee)
 
@@ -430,7 +438,20 @@ func (api *pubSubAPI) subscribeNewHeads(wsConn *wsConn, subID rpc.ID) (pubsub.Un
 					MixDigest:        ethHeader.MixDigest,
 					Nonce:            ethHeader.Nonce,
 					CosmosHeaderHash: common.BytesToHash(cosmosHeader.Hash()),
+					BaseFee:          baseFee,
 				}
+
+				ctx := types.ContextWithHeight(cosmosHeader.Height)
+				// fix gas limit
+				fixGasLimit(ctx, api, compatibleEthHeader)
+				// fix coinbase, need search the proposer's val address by consensus address in the header
+				fixCoinbase(ctx, api, queryClient, compatibleEthHeader)
+				// fix gas used
+				resBlock := fixGasUsed(ctx, api, compatibleEthHeader)
+				// fix base fee
+				fixBaseFee(ctx, queryClient, compatibleEthHeader, resBlock)
+				// fix bloom
+				fixBloom(compatibleEthHeader, resBlock)
 
 				// write to ws conn
 				res := &SubscriptionNotification{
@@ -718,4 +739,128 @@ func isBatch(raw []byte) bool {
 		return c == '['
 	}
 	return false
+}
+
+func getBaseFee(ctx context.Context, client types.QueryClient, blockRes *tmrpctypes.ResultBlockResults) (*big.Int, error) {
+	// return BaseFee if London hard fork is activated and feemarket is enabled
+	res, err := client.BaseFee(ctx, &evmtypes.QueryBaseFeeRequest{})
+	if err != nil || res.BaseFee == nil {
+		// we can't tell if it's london HF not enabled or the state is pruned,
+		// in either case, we'll fallback to parsing from begin blocker event,
+		// faster to iterate reversely
+		for i := len(blockRes.BeginBlockEvents) - 1; i >= 0; i-- {
+			evt := blockRes.BeginBlockEvents[i]
+			if evt.Type == feemarkettypes.EventTypeFeeMarket && len(evt.Attributes) > 0 {
+				baseFee, err := strconv.ParseInt(evt.Attributes[0].Value, 10, 64)
+				if err == nil {
+					return big.NewInt(baseFee), nil
+				}
+				break
+			}
+		}
+		return nil, err
+	}
+
+	if res.BaseFee == nil {
+		return nil, nil
+	}
+
+	return res.BaseFee.BigInt(), nil
+}
+
+func fixGasLimit(ctx context.Context, api *pubSubAPI, header *types.EthHeader) {
+	gasLimit, err := types.BlockMaxGasFromConsensusParams(ctx, api.clientCtx, header.Number.Int64())
+	if err != nil {
+		api.logger.Error("failed to query consensus params", "error", err.Error())
+	} else {
+		header.GasLimit = uint64(gasLimit)
+	}
+}
+
+func fixCoinbase(ctx context.Context, api *pubSubAPI, queryClient *types.QueryClient, header *types.EthHeader) {
+	// need search the proposer's val address by consensus address in the header
+	var validatorAccAddr sdk.AccAddress
+	req := &evmtypes.QueryValidatorAccountRequest{
+		ConsAddress: sdk.ConsAddress(header.Coinbase.Bytes()).String(),
+	}
+	resp, err := queryClient.ValidatorAccount(ctx, req)
+	if err != nil {
+		api.logger.Debug(
+			"failed to query validator operator address",
+			"height", header.Number.Int64(),
+			"cons-address", req.ConsAddress,
+			"error", err.Error(),
+		)
+		// use zero address as the validator operator address
+		validatorAccAddr = sdk.AccAddress(common.Address{}.Bytes())
+	} else {
+		validatorAccAddr, _ = sdk.AccAddressFromBech32(resp.AccountAddress)
+	}
+
+	validatorAddr := common.BytesToAddress(validatorAccAddr)
+	header.Coinbase = validatorAddr
+}
+
+func fixGasUsed(ctx context.Context, api *pubSubAPI, header *types.EthHeader) *tmrpctypes.ResultBlockResults {
+	sc, ok := api.clientCtx.Client.(tmrpcclient.SignClient)
+	if !ok {
+		api.logger.Error("invalid rpc client")
+		return nil
+	} else {
+		height := header.Number.Int64()
+		resBlock, err := sc.BlockResults(ctx, &height)
+		if err != nil {
+			api.logger.Debug("GetEthBlockFromTendermint failed", "height", height, "error", err.Error())
+			return nil
+		} else {
+			gasUsed := uint64(0)
+			for _, txsResult := range resBlock.TxsResults {
+				// workaround for cosmos-sdk bug. https://github.com/cosmos/cosmos-sdk/issues/10832
+				if backend.ShouldIgnoreGasUsed(txsResult) {
+					// block gas limit has exceeded, other txs must have failed with same reason.
+					break
+				}
+				gasUsed += uint64(txsResult.GetGasUsed())
+			}
+			header.GasUsed = gasUsed
+			return resBlock
+		}
+	}
+}
+
+func fixBaseFee(ctx context.Context, queryClient *types.QueryClient, header *types.EthHeader, resBlock *tmrpctypes.ResultBlockResults) {
+	// return BaseFee if London hard fork is activated and feemarket is enabled
+	res, err := queryClient.BaseFee(ctx, &evmtypes.QueryBaseFeeRequest{})
+	if err != nil || res.BaseFee == nil {
+		// we can't tell if it's london HF not enabled or the state is pruned,
+		// in either case, we'll fallback to parsing from begin blocker event,
+		// faster to iterate reversely
+		for i := len(resBlock.BeginBlockEvents) - 1; i >= 0; i-- {
+			evt := resBlock.BeginBlockEvents[i]
+			if evt.Type == feemarkettypes.EventTypeFeeMarket && len(evt.Attributes) > 0 {
+				baseFee, err := strconv.ParseInt(evt.Attributes[0].Value, 10, 64)
+				if err == nil {
+					header.BaseFee = big.NewInt(baseFee)
+				}
+				break
+			}
+		}
+	} else {
+		header.BaseFee = res.BaseFee.BigInt()
+	}
+}
+
+func fixBloom(header *types.EthHeader, resBlock *tmrpctypes.ResultBlockResults) {
+	for _, event := range resBlock.EndBlockEvents {
+		if event.Type != evmtypes.EventTypeBlockBloom {
+			continue
+		}
+
+		for _, attr := range event.Attributes {
+			if attr.Key == evmtypes.AttributeKeyEthereumBloom {
+				header.Bloom = ethtypes.BytesToBloom([]byte(attr.Value))
+				return
+			}
+		}
+	}
 }
