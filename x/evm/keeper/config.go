@@ -66,8 +66,10 @@ func (k Keeper) VMConfig(ctx sdk.Context, msg core.Message, cfg *statedb.EVMConf
 	}
 
 	var debug bool
-	if _, ok := tracer.(types.NoOpTracer); !ok {
-		debug = true
+	if tracer != nil {
+		if _, ok := tracer.(*types.NoOpTracer); !ok {
+			debug = true
+		}
 	}
 
 	return vm.Config{
